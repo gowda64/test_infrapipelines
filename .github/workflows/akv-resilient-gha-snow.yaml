@@ -1,0 +1,336 @@
+# This workflow provisions resilient (multi-region) Key Vaults using the akv-resilient Terraform module.
+
+name: akv-resilient-gha-snow
+run-name: "${{fromJson(github.event.inputs.tf_resource_json).ritm}}-akv-resilient"
+
+on:
+  workflow_dispatch:
+    inputs:
+      tf_resource_json:
+        type: string
+        required: true
+  repository_dispatch:
+    types: [akv-resilient-gha-snow]
+
+jobs:
+  akv-resilient-gha-snow:
+    runs-on: [ K8S ]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: master
+
+      - name: writetofile
+        uses: albertsons/esgh-file-write-action@master
+        with:
+          path: ${{ github.workspace }}/input.json
+          contents: |
+            ${{ github.event.inputs.tf_resource_json }}
+          write-mode: overwrite
+
+      - name: Parameter JSON
+        id: par
+        run: |
+          content=`cat ${{ github.workspace }}/input.json`
+          echo "inputJson=$content" >> "$GITHUB_OUTPUT"
+          echo $content
+
+      - name: set json variables
+        id: var
+        continue-on-error: false
+        run: |
+          echo "subscription_id=${{fromJson(steps.par.outputs.inputJson).subscription_id}}" >> "$GITHUB_OUTPUT"
+          echo "environment=${{fromJson(steps.par.outputs.inputJson).environment}}" >> "$GITHUB_OUTPUT"
+          echo "RITM=${{fromJson(steps.par.outputs.inputJson).ritm}}" >> "$GITHUB_OUTPUT"
+          echo "skip_snow=${{fromJson(steps.par.outputs.inputJson).snow_flag}}" >> "$GITHUB_OUTPUT"
+
+      - name: az login sandbox
+        if: ${{ steps.var.outputs.environment == 'sandbox' }}
+        run: |
+          az login --service-principal -u ${{ secrets.AZ_ESCO_CLIENT_ID_NONPROD }} -p ${{ secrets.AZ_ESCO_CLIENT_SECRET_NONPROD }} -t ${{ secrets.AZ_ESCO_TENANT_ID }} --output none
+
+      - name: az login nonprod
+        if: ${{ steps.var.outputs.environment == 'nonprod' }}
+        run: |
+          az login --service-principal -u ${{ secrets.AZ_ESCO_CLIENT_ID_NONPROD }} -p ${{ secrets.AZ_ESCO_CLIENT_SECRET_NONPROD }} -t ${{ secrets.AZ_ESCO_TENANT_ID }} --output none
+          echo "Login successful"
+
+      - name: az login prod
+        if: ${{ steps.var.outputs.environment == 'prod' }}
+        run: |
+          az login --service-principal -u ${{ secrets.AZ_ESCO_CLIENT_ID_PROD }} -p ${{ secrets.AZ_ESCO_CLIENT_SECRET_PROD }} -t ${{ secrets.AZ_ESCO_TENANT_ID }} --output none
+          echo "Login successful"
+
+      - name: Build resilient tfvars from payload
+        id: payload
+        continue-on-error: false
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          payload = json.loads((workspace / "input.json").read_text(encoding="utf-8"))
+
+          def normalize_bool(v, default=False):
+              if isinstance(v, bool):
+                  return v
+              if isinstance(v, str):
+                  return v.strip().lower() in {"true", "1", "yes", "y"}
+              if v is None:
+                  return default
+              return bool(v)
+
+          def validate_kv_name(name):
+              # Azure Key Vault name: 3-24 chars, lowercase letters, numbers, hyphens, starts with a letter.
+              if not re.fullmatch(r"[a-z][a-z0-9-]{2,23}", name):
+                  raise ValueError(f"Invalid key vault name '{name}'. Must match ^[a-z][a-z0-9-]{{2,23}}$")
+
+          def derive_regional_name(base_name, region, role_suffix):
+              region_tokens = ["westus2", "westus", "eastus2", "eastus"]
+              segments = base_name.split("-")
+              replaced = False
+              for idx, seg in enumerate(segments):
+                  if seg in region_tokens:
+                      segments[idx] = region
+                      replaced = True
+                      break
+
+              if replaced:
+                  name = "-".join(segments)
+              elif base_name.endswith("-pr") or base_name.endswith("-sr") or base_name.endswith("-dr"):
+                  name = f"{base_name[:-3]}-{role_suffix}"
+              else:
+                  name = f"{base_name}-{role_suffix}"
+
+              validate_kv_name(name)
+              return name
+
+          keyvault_name = payload.get("keyvault_name", "")
+          if not keyvault_name:
+              raise ValueError("Payload must include keyvault_name")
+          validate_kv_name(keyvault_name)
+
+          environment = payload.get("environment", "")
+          if not environment:
+              raise ValueError("Payload must include environment")
+
+          regions = payload.get("regions")
+          if not isinstance(regions, dict):
+              raise ValueError("Payload must include regions object")
+          if len(regions.keys()) != 3:
+              raise ValueError("Resilient deployment requires exactly 3 distinct regions in payload.regions")
+
+          kv_appcode = keyvault_name.split("-")[0]
+
+          for region, cfg in regions.items():
+              if not isinstance(cfg, dict):
+                  raise ValueError(f"Region {region} config must be an object")
+              for req in ["role_suffix", "kv_resource_group", "vnet_name", "subnet_name", "snet_rg_name"]:
+                  if not cfg.get(req):
+                      raise ValueError(f"Region {region} missing required field: {req}")
+
+              cfg["keyvault_name"] = derive_regional_name(keyvault_name, region, cfg["role_suffix"])
+
+              # Keep old validation intent: appcode prefix in KV name must align with RG and subnet naming.
+              if f"{kv_appcode}-" not in cfg["kv_resource_group"]:
+                  raise ValueError(f"Appcode '{kv_appcode}' from keyvault_name does not match kv_resource_group for region {region}")
+              if f"{kv_appcode}-" not in cfg["subnet_name"]:
+                  raise ValueError(f"Appcode '{kv_appcode}' from keyvault_name does not match subnet_name for region {region}")
+
+          tfvars = {
+              "subscription_id": payload.get("subscription_id", ""),
+              "tenant_id": payload.get("tenant_id", "b7f604a0-00a9-4188-9248-42f3a5aac2e9"),
+              "environment": environment,
+              "keyvault_name": keyvault_name,
+              "regions": regions,
+              "private_dns_zone_id": payload.get("private_dns_zone_id", ""),
+              "private_dns_zone_rg_name": payload.get("private_dns_zone_rg_name", ""),
+              "private_dns_zone_name": payload.get("private_dns_zone_name", "privatelink.vaultcore.azure.net"),
+              "private_dns_zone_group": payload.get("private_dns_zone_group", "kv-privatelink"),
+              "sku_name": payload.get("sku_name", "premium"),
+              "purge_protection_enabled": normalize_bool(payload.get("purge_protection_enabled"), True),
+              "rbac_assignments": payload.get("rbac_assignments", []),
+              "RITM": payload.get("ritm", ""),
+              "skip_snow": normalize_bool(payload.get("snow_flag"), False),
+              "appcode": payload.get("appcode", ""),
+              "appname": payload.get("appname", ""),
+              "costcenter": payload.get("costcenter", ""),
+              "portfolio": payload.get("portfolio", ""),
+              "drtier": payload.get("drtier", ""),
+          }
+
+          # Build deterministic vault names from tfvars inputs (same naming as terraform module).
+          targets = []
+          for region, cfg in regions.items():
+              name = cfg["keyvault_name"]
+              targets.append({
+                  "name": name,
+                  "resource_group": cfg["kv_resource_group"],
+                  "region": region,
+              })
+
+          module_dir = workspace / "infrastructure" / "akv-resilient"
+          (module_dir / "variables.auto.tfvars.json").write_text(json.dumps(tfvars, indent=2), encoding="utf-8")
+          (workspace / "kv_targets.json").write_text(json.dumps(targets, indent=2), encoding="utf-8")
+
+          kv_names = ",".join(t["name"] for t in targets)
+          primary_region = next(iter(regions.keys()))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"keyvault_name={keyvault_name}\n")
+              out.write(f"primary_region={primary_region}\n")
+              out.write(f"kv_names={kv_names}\n")
+          PY
+
+      - name: Check if AKVs Exist
+        id: check-akv
+        run: |
+          #!/bin/bash
+          set -euo pipefail
+          az account set --subscription ${{steps.var.outputs.subscription_id}}
+
+          ALL_EXISTS=true
+          while IFS='|' read -r kv_name kv_rg; do
+            if [ -z "$kv_name" ] || [ -z "$kv_rg" ]; then
+              echo "Missing kv target details in payload"
+              exit 1
+            fi
+
+            EXISTS=$(az keyvault show --name "$kv_name" --resource-group "$kv_rg" --subscription "${{ steps.var.outputs.subscription_id }}" --query "id" --output tsv 2>/dev/null || echo "AKV_NOT_FOUND")
+            if [ "$EXISTS" = "AKV_NOT_FOUND" ]; then
+              ALL_EXISTS=false
+              echo "Not found: $kv_name in $kv_rg"
+            else
+              echo "Exists: $kv_name in $kv_rg"
+            fi
+          done < <(python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          targets = json.loads((Path(os.environ["GITHUB_WORKSPACE"]) / "kv_targets.json").read_text(encoding="utf-8"))
+          for t in targets:
+              print(f"{t['name']}|{t['resource_group']}")
+          PY
+          )
+
+          if [ "$ALL_EXISTS" = true ]; then
+            echo "AKV_EXISTS=true" >> $GITHUB_ENV
+            echo "akv_exists=true" >> "$GITHUB_OUTPUT"
+            echo "All resilient Key Vaults already exist, will skip next steps"
+          else
+            echo "AKV_EXISTS=false" >> $GITHUB_ENV
+            echo "akv_exists=false" >> "$GITHUB_OUTPUT"
+            echo "One or more resilient Key Vaults do not exist, will proceed"
+          fi
+
+          az logout
+
+      - name: write nonprod az sp to file
+        if: ${{ steps.var.outputs.environment == 'nonprod' || steps.var.outputs.environment == 'sandbox' }}
+        uses: albertsons/esgh-file-write-action@master
+        with:
+          path: ${{ github.workspace }}/secrets.auto.tfvars_nonprod.json
+          contents: ${{ secrets.AZ_SP_ESCO_NONPROD }}
+          write-mode: overwrite
+
+      - name: write nonprod az backend to file
+        if: ${{ steps.var.outputs.environment == 'nonprod' || steps.var.outputs.environment == 'sandbox' }}
+        uses: albertsons/esgh-file-write-action@master
+        with:
+          path: ${{ github.workspace }}/backend_nonprod.json
+          contents: ${{ secrets.AZ_BACKEND_ESCO_NONPROD }}
+          write-mode: overwrite
+
+      - name: write prod az sp to file
+        if: ${{ steps.var.outputs.environment == 'prod' }}
+        uses: albertsons/esgh-file-write-action@master
+        with:
+          path: ${{ github.workspace }}/secrets.auto.tfvars_prod.json
+          contents: ${{ secrets.AZ_SP_ESCO_PROD }}
+          write-mode: overwrite
+
+      - name: write prod az backend to file
+        if: ${{ steps.var.outputs.environment == 'prod' }}
+        uses: albertsons/esgh-file-write-action@master
+        with:
+          path: ${{ github.workspace }}/backend_prod.json
+          contents: ${{ secrets.AZ_BACKEND_ESCO_PROD }}
+          write-mode: overwrite
+
+      - name: Terraform Init
+        id: Init
+        if: steps.check-akv.outputs.akv_exists == 'false'
+        continue-on-error: false
+        run: |
+          #!/bin/bash
+          set -x
+          environment=${{ steps.var.outputs.environment }}
+          if [[ "$environment" == "prod" ]]; then
+            ENV="prod"
+          else
+            ENV="nonprod"
+          fi
+
+          primary_region=${{ steps.payload.outputs.primary_region }}
+          cd ${{ github.workspace }}/infrastructure/akv-resilient && ls -lrt
+          mv ${{ github.workspace }}/backend_$ENV.json ${{ github.workspace }}/infrastructure/akv-resilient/backend.json
+          mv ${{ github.workspace }}/secrets.auto.tfvars_$ENV.json ${{ github.workspace }}/infrastructure/akv-resilient/secrets.auto.tfvars.json
+          TERRAFORM_STATE_KEY=$primary_region/${{ steps.var.outputs.environment }}/akv-resilient/${{ steps.payload.outputs.keyvault_name }}/terraform.tfstate
+
+          cd ${{ github.workspace }}/infrastructure/akv-resilient && ls -lrt
+          terraform init -input=false -backend-config="backend.json" -backend-config=key=$TERRAFORM_STATE_KEY
+          terraform -version
+
+      - name: tf plan
+        if: steps.check-akv.outputs.akv_exists == 'false'
+        continue-on-error: false
+        id: plan
+        run: |
+          cd ${{ github.workspace }}/infrastructure/akv-resilient && ls -lrt
+          terraform plan -input=false -out=tfplan
+          terraform show -no-color tfplan > tf-file.plan
+          pwd
+          ls -lrt
+
+      - name: TF_Apply
+        id: Apply
+        if: steps.check-akv.outputs.akv_exists == 'false'
+        continue-on-error: false
+        run: |
+          cd ${{ github.workspace }}/infrastructure/akv-resilient && ls -lrt
+          terraform apply -input=false tfplan
+
+      - name: check deployment status
+        id: export
+        run: |
+          if [ "${{ steps.Apply.outcome }}" == "success" ] && [ "${{ steps.plan.outcome }}" == "success" ] && [ "${{ steps.Init.outcome }}" == "success" ]; then
+            echo "AKV resilient JOB Executed Successfully"
+            export RITM_STATUS=success
+            export message="AKV resilient JOB Executed Successfully"
+            export keyvaults="${{ steps.payload.outputs.kv_names }}"
+          else
+            export keyvaults="${{ steps.payload.outputs.kv_names }}"
+            export RITM_STATUS=FAILURE
+            export message="AKV resilient JOB Failed, please check the payload"
+            echo "AKV resilient JOB Executed Failed"
+          fi
+
+          echo " ################ ritm-status-update-servicenow ################################"
+          if [ "${{ steps.var.outputs.skip_snow }}" != false ]; then
+             echo "$RITM_STATUS, $message"
+             curl -v -X POST "https://safeway.service-now.com/api/safe2/jenkins2git/updatesnow" -H 'Authorization: Basic ${{secrets.SNOW_SECRET}}' -H "Accept:application/json" -H "Content-Type:application/json" --data "{\"status\":\"$RITM_STATUS\",\"snow_ritm\":\"${{ steps.var.outputs.RITM }}\", \"message\":\"$message\", \"key-vault\":\"$keyvaults\"}"
+          elif [ "${{ steps.var.outputs.skip_snow }}" == false ] && [ "${{ steps.Apply.outcome }}" == "success" ] && [ "${{ steps.plan.outcome }}" == "success" ] && [ "${{ steps.Init.outcome }}" == "success" ]; then
+              echo "Request raised from self-service portal, RITM updates to servicenow skipped as self-service gets it by GET RESPONSE call"
+          elif [ "${{ steps.var.outputs.skip_snow }}" == false ] && [ "${{ steps.Apply.outcome }}" == "skipped" ] && [ "${{ steps.plan.outcome }}" == "skipped" ] && [ "${{ steps.Init.outcome }}" == "skipped" ]; then
+              echo "All resilient AKVs already exist, request considered no-op"
+          elif [ "${{ steps.var.outputs.skip_snow }}" == false ] && [ "${{ steps.Apply.outcome }}" != "success" ] && [ "${{ steps.plan.outcome }}" != "success" ] && [ "${{ steps.Init.outcome }}" != "success" ]; then
+              echo "Request raised from self-service portal is failed"
+              exit 1
+          else
+             echo "JOB FAILED CHECK INPUT PARAMETERS"
+             exit 1
+          fi
