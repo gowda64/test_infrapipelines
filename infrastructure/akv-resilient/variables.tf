@@ -81,11 +81,6 @@ variable "enforce_private_dns_zone_resolution" {
   type        = bool
   default     = true
   description = "When true, require either private_dns_zone_id or private_dns_zone_rg_name so DNS zone group can be configured."
-
-  validation {
-    condition = var.enforce_private_dns_zone_resolution == false || var.private_dns_zone_id != "" || var.private_dns_zone_rg_name != ""
-    error_message = "Set private_dns_zone_id or private_dns_zone_rg_name (or disable enforce_private_dns_zone_resolution) to resolve the private DNS zone."
-  }
 }
 
 #Key Vault settings

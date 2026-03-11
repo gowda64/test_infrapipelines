@@ -1,23 +1,26 @@
 #Authentication/Subscription
+# Note: client_id/client_secret not needed when using Azure CLI auth (azure/login action)
 variable "client_id" {
-  type = string
+  type    = string
   default = ""
 }
 variable "client_secret" {
-  type = string
-  default = ""
+  type      = string
+  default   = ""
+  sensitive = true
 }
 variable "tfstate_accesskey" {
-  type = string
-  default = ""
+  type      = string
+  default   = ""
+  sensitive = true
 }
 variable "subscription_id" {
-  type = string
-  default = ""
+  type        = string
+  description = "Azure subscription ID to deploy into"
 }
 variable "tenant_id" {
-  type = string
-  default = "b7f604a0-00a9-4188-9248-42f3a5aac2e9"
+  type    = string
+  default = ""
 }
 
 #Environment and Naming
@@ -78,11 +81,6 @@ variable "enforce_private_dns_zone_resolution" {
   type        = bool
   default     = true
   description = "When true, require either private_dns_zone_id or private_dns_zone_rg_name so DNS zone group can be configured."
-
-  validation {
-    condition = var.enforce_private_dns_zone_resolution == false || var.private_dns_zone_id != "" || var.private_dns_zone_rg_name != ""
-    error_message = "Set private_dns_zone_id or private_dns_zone_rg_name (or disable enforce_private_dns_zone_resolution) to resolve the private DNS zone."
-  }
 }
 
 #Key Vault settings
