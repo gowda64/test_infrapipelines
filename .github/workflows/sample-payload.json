@@ -1,0 +1,40 @@
+{
+  "subscription_id": "YOUR-SUBSCRIPTION-ID-HERE",
+  "tenant_id": "YOUR-TENANT-ID-HERE",
+  "environment": "test",
+  "keyvault_name": "myapp-kv-westus",
+  "regions": {
+    "westus": {
+      "role_suffix": "pr",
+      "kv_resource_group": "myapp-rg-westus",
+      "vnet_name": "myapp-vnet-westus",
+      "subnet_name": "myapp-pe-snet-westus",
+      "snet_rg_name": "myapp-network-rg-westus"
+    },
+    "westus2": {
+      "role_suffix": "sr",
+      "kv_resource_group": "myapp-rg-westus2",
+      "vnet_name": "myapp-vnet-westus2",
+      "subnet_name": "myapp-pe-snet-westus2",
+      "snet_rg_name": "myapp-network-rg-westus2"
+    },
+    "eastus": {
+      "role_suffix": "dr",
+      "kv_resource_group": "myapp-rg-eastus",
+      "vnet_name": "myapp-vnet-eastus",
+      "subnet_name": "myapp-pe-snet-eastus",
+      "snet_rg_name": "myapp-network-rg-eastus"
+    }
+  },
+  "private_dns_zone_rg_name": "",
+  "private_dns_zone_id": "",
+  "enforce_private_dns_zone_resolution": false,
+  "sku_name": "premium",
+  "purge_protection_enabled": false,
+  "rbac_assignments": [],
+  "appcode": "myapp",
+  "appname": "My Test Application",
+  "costcenter": "CC12345",
+  "portfolio": "Test",
+  "drtier": "tier3"
+}
