@@ -254,7 +254,22 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.5.0"
+          terraform_version: "1.4.7"
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Run TFLint
+        id: tflint
+        working-directory: ${{ github.workspace }}/infrastructure/akv-resilient
+        run: |
+          echo "=== TFLint ==="
+          tflint --init
+          tflint --format compact
+          echo ""
+          echo "[SUCCESS] TFLint passed"
 
       - name: Terraform Init
         id: init
