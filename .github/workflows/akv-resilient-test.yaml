@@ -15,6 +15,10 @@ on:
         description: 'Only run terraform plan (no apply)'
         type: boolean
         default: true
+      skip_akv_check:
+        description: 'Skip checking if Key Vaults already exist'
+        type: boolean
+        default: false
 
 jobs:
   akv-resilient-test:
@@ -194,6 +198,7 @@ jobs:
 
       - name: Check if Key Vaults exist
         id: check-akv
+        if: ${{ github.event.inputs.skip_akv_check != 'true' }}
         run: |
           set -euo pipefail
           
@@ -254,22 +259,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.4.7"
-
-      - name: Setup TFLint
-        uses: terraform-linters/setup-tflint@v4
-        with:
-          tflint_version: latest
-
-      - name: Run TFLint
-        id: tflint
-        working-directory: ${{ github.workspace }}/infrastructure/akv-resilient
-        run: |
-          echo "=== TFLint ==="
-          tflint --init
-          tflint --format compact
-          echo ""
-          echo "[SUCCESS] TFLint passed"
+          terraform_version: "1.5.0"
 
       - name: Terraform Init
         id: init
@@ -288,6 +278,21 @@ jobs:
           
           terraform init -input=false
           terraform version
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Run TFLint
+        id: tflint
+        working-directory: ${{ github.workspace }}/infrastructure/akv-resilient
+        run: |
+          echo "=== TFLint ==="
+          tflint --init
+          tflint --format compact
+          echo ""
+          echo "[SUCCESS] TFLint passed"
 
       - name: Terraform Validate
         working-directory: ${{ github.workspace }}/infrastructure/akv-resilient
@@ -332,5 +337,6 @@ jobs:
           echo "  Payload Validation: ${{ steps.payload.outcome }}"
           echo "  AKV Check: ${{ steps.check-akv.outcome }}"
           echo "  Terraform Init: ${{ steps.init.outcome }}"
+          echo "  TFLint: ${{ steps.tflint.outcome || 'skipped' }}"
           echo "  Terraform Plan: ${{ steps.plan.outcome }}"
           echo "  Terraform Apply: ${{ steps.apply.outcome || 'skipped' }}"
